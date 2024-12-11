@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>2D Shooter Game - Online</title>
+    <style>
+        #gameCanvas {
+            border: 1px solid black;
+            background: #87CEEB;
+        }
+        .controls {
+            margin: 20px;
+            text-align: center;
+        }
+        #matchmaking {
+            text-align: center;
+            margin: 20px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="matchmaking">
+        <button id="findMatch">Find Match</button>
+        <p id="status">Click to find a match</p>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="600" class="hidden"></canvas>
+    <div class="controls hidden">
+        <p>WASD to move, Space to shoot</p>
+    </div>
+
+    <script>
+        // Connect to WebSocket server
+        const ws = new WebSocket('wss://your-game-server.com');
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const findMatchBtn = document.getElementById('findMatch');
+        const statusText = document.getElementById('status');
+        let gameStarted = false;
+        let playerId = null;
+        let opponent = null;
+
+        class Player {
+            constructor(x, y, color, controls) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.radius = 20;
+                this.speed = 5;
+                this.controls = controls;
+                this.bullets = [];
+                this.health = 100;
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.closePath();
+
+                // Health bar
+                ctx.fillStyle = 'red';
+                ctx.fillRect(this.x - 25, this.y - 30, 50, 5);
+                ctx.fillStyle = 'green';
+                ctx.fillRect(this.x - 25, this.y - 30, this.health / 2, 5);
+            }
+
+            update() {
+                if (keys[this.controls.up]) this.y -= this.speed;
+                if (keys[this.controls.down]) this.y += this.speed;
+                if (keys[this.controls.left]) this.x -= this.speed;
+                if (keys[this.controls.right]) this.x += this.speed;
+
+                // Keep player in bounds
+                this.x = Math.max(this.radius, Math.min(canvas.width - this.radius, this.x));
+                this.y = Math.max(this.radius, Math.min(canvas.height - this.radius, this.y));
+
+                // Update bullets
+                for (let i = this.bullets.length - 1; i >= 0; i--) {
+                    this.bullets[i].update();
+                    if (this.bullets[i].isOffscreen()) {
+                        this.bullets.splice(i, 1);
+                    }
+                }
+
+                // Send position update to server
+                ws.send(JSON.stringify({
+                    type: 'position',
+                    x: this.x,
+                    y: this.y,
+                    health: this.health,
+                    bullets: this.bullets
+                }));
+            }
+
+            shoot() {
+                if (this.bullets.length < 5) {
+                    const bullet = new Bullet(this.x, this.y, this.color);
+                    this.bullets.push(bullet);
+                    ws.send(JSON.stringify({
+                        type: 'shoot',
+                        x: this.x,
+                        y: this.y
+                    }));
+                }
+            }
+        }
+
+        class Bullet {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.radius = 5;
+                this.speed = 7;
+                this.color = color;
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.closePath();
+            }
+
+            update() {
+                this.x += this.speed;
+            }
+
+            isOffscreen() {
+                return this.x > canvas.width;
+            }
+        }
+
+        let player = null;
+        const keys = {};
+
+        // WebSocket event handlers
+        ws.onopen = () => {
+            console.log('Connected to server');
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            
+            switch(data.type) {
+                case 'matchFound':
+                    playerId = data.playerId;
+                    startGame(data.position);
+                    break;
+                    
+                case 'opponentUpdate':
+                    if (opponent) {
+                        opponent.x = data.x;
+                        opponent.y = data.y;
+                        opponent.health = data.health;
+                        opponent.bullets = data.bullets;
+                    }
+                    break;
+
+                case 'gameOver':
+                    alert(data.winner === playerId ? 'You win!' : 'You lose!');
+                    resetGame();
+                    break;
+            }
+        };
+
+        findMatchBtn.onclick = () => {
+            statusText.textContent = 'Finding match...';
+            ws.send(JSON.stringify({ type: 'findMatch' }));
+        };
+
+        function startGame(position) {
+            gameStarted = true;
+            document.getElementById('matchmaking').classList.add('hidden');
+            canvas.classList.remove('hidden');
+            document.querySelector('.controls').classList.remove('hidden');
+
+            player = new Player(position.x, position.y, 'blue', {
+                up: 'w',
+                down: 's',
+                left: 'a',
+                right: 'd',
+                shoot: ' '
+            });
+
+            opponent = new Player(position.opponentX, position.opponentY, 'red', {});
+            
+            gameLoop();
+        }
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key.toLowerCase() === player?.controls.shoot) player.shoot();
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+
+        function checkCollisions() {
+            if (!player || !opponent) return;
+
+            // Check player bullets hitting opponent
+            player.bullets.forEach((bullet, index) => {
+                const dx = bullet.x - opponent.x;
+                const dy = bullet.y - opponent.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                if (distance < bullet.radius + opponent.radius) {
+                    ws.send(JSON.stringify({
+                        type: 'hit',
+                        target: 'opponent'
+                    }));
+                    player.bullets.splice(index, 1);
+                }
+            });
+        }
+
+        function resetGame() {
+            gameStarted = false;
+            player = null;
+            opponent = null;
+            document.getElementById('matchmaking').classList.remove('hidden');
+            canvas.classList.add('hidden');
+            document.querySelector('.controls').classList.add('hidden');
+            statusText.textContent = 'Click to find a match';
+        }
+
+        function gameLoop() {
+            if (!gameStarted) return;
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (player) {
+                player.update();
+                player.draw();
+                player.bullets.forEach(bullet => bullet.draw());
+            }
+
+            if (opponent) {
+                opponent.draw();
+                opponent.bullets.forEach(bullet => bullet.draw());
+            }
+
+            checkCollisions();
+
+            requestAnimationFrame(gameLoop);
+        }
+    </script>
+</body>
+</html>
